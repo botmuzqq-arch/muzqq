@@ -1,0 +1,6 @@
+# Railway's default Nixpacks Python image does NOT ship ffmpeg.
+# yt-dlp's audio extraction (FFmpegExtractAudio) and the mp3-conversion
+# fallback in downloader.py both shell out to the `ffmpeg` binary — without
+# this, audio downloads will fail at the very last step every time.
+[phases.setup]
+nixPkgs = ["...", "ffmpeg"]

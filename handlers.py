@@ -16,7 +16,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Optional
-
+from aiogram.types import LabeledPrice, PreCheckoutQuery
 from aiogram import Router, F, Bot
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
@@ -35,6 +35,7 @@ from keyboards import (
     main_menu_keyboard, link_action_keyboard,
     search_results_keyboard, download_format_keyboard,
     shazam_result_keyboard, admin_keyboard,
+    premium_keyboard,
 )
 from downloader import (
     search_music, get_trending, download_audio, download_video,
@@ -182,7 +183,7 @@ async def cmd_start(message: Message):
     name = message.from_user.first_name or "друг"
     await message.answer(
         f"👋 Привет, <b>{name}</b>!\n\n"
-        "🎵 Я — <b>Music Bot</b>, твой персональный музыкальный сервис.\n\n"
+        "🎵 Я — <b>MuzQQ bot</b>, твой персональный музыкальный сервис.\n\n"
         "<b>Что умею:</b>\n"
         "🔍 Искать музыку по названию или артисту\n"
         "📥 Скачивать аудио и видео (YouTube, TikTok, Instagram)\n"
@@ -192,6 +193,55 @@ async def cmd_start(message: Message):
         reply_markup=main_menu_keyboard(),
     )
 
+# ─── Premium ──────────────────────────────────────────────────────────────
+
+@router.message(F.text == "💎 Premium")
+@router.callback_query(F.data == "premium_info")
+async def cmd_premium_info(message_or_call):
+    """Информация о Premium."""
+    from config import PREMIUM_PRICE_LABEL
+    text = (
+        f"💎 <b>Premium Music Bot</b>\n\n"
+        f"<b>Что даёт подписка:</b>\n"
+        f"✅ <b>Безлимитные скачивания</b>\n"
+        f"✅ <b>Высокое качество</b> (1080p, 320kbps)\n"
+        f"✅ <b>Приоритетная обработка</b>\n"
+        f"✅ <b>Скачивание плейлистов</b>\n"
+        f"✅ <b>Поддержка 24/7</b>\n\n"
+        f"💰 <b>Цена:</b> {PREMIUM_PRICE_LABEL}\n\n"
+        f"👇 <i>Нажми кнопку ниже, чтобы оформить</i>"
+    )
+    if isinstance(message_or_call, Message):
+        await message_or_call.answer(text, reply_markup=premium_keyboard())
+    else:
+        await message_or_call.message.edit_text(text, reply_markup=premium_keyboard())
+        await message_or_call.answer()
+
+# ─── «Купить Premium» ─────────────────────────────────────────────────────
+@router.callback_query(F.data == "buy_premium")
+async def buy_premium_callback(call: CallbackQuery, bot: Bot):
+    """Отправляет счёт на оплату Premium через Telegram Stars."""
+    await bot.send_invoice(
+        chat_id=call.from_user.id,
+        title="⭐ Premium Music Bot",
+        description="Безлимитные скачивания на 30 дней\n"
+                    "🎵 1080p видео\n"
+                    "📥 Неограниченное количество скачиваний\n"
+                    "⚡ Приоритетная обработка",
+        payload="premium_month",  # ваш уникальный идентификатор
+        currency="XTR",  # XTR = Telegram Stars
+        prices=[LabeledPrice(label="Premium подписка", amount=400)],  # 400 Stars
+        provider_token="",  # для Stars оставляем пустым
+        start_parameter="premium",
+    )
+    await call.answer()
+
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu(call: CallbackQuery):
+    """Возврат в главное меню."""
+    await call.message.delete()
+    await cmd_start(call.message)
+    await call.answer()
 
 # ─── /help ────────────────────────────────────────────────────────────────────
 
@@ -346,30 +396,41 @@ async def cmd_trending(message: Message):
 
     await message.answer("\n".join(lines), reply_markup=search_results_keyboard(results))
 
+# ─── Кнопки главного меню (кроме Premium, он уже есть) ─────────────────────
 
-# ─── Обработка текстовых сообщений (URL или поиск) ───────────────────────────
+@router.message(F.text == "🔍 Поиск музыки")
+async def cmd_search_button(message: Message, state: FSMContext):
+    await cmd_search(message, state)
 
-@router.message(F.text)
-async def handle_text(message: Message, state: FSMContext):
-    text = message.text.strip()
 
-    url = extract_url(text)
-    if url:
-        platform = detect_platform(url)
-        if platform:
-            await handle_url(message, url, platform)
-            return
-        await message.answer(
-            "⚠️ Эта платформа не поддерживается.\n"
-            "Поддерживаются: YouTube, TikTok, Instagram."
-        )
+@router.message(F.text == "🔥 Топ треки")
+async def cmd_top_button(message: Message):
+    await cmd_trending(message)
+
+
+@router.message(F.text == "🎤 Распознать песню")
+async def cmd_recognize_button(message: Message):
+    await cmd_recognize(message)
+
+
+@router.message(F.text == "❓ Помощь")
+async def cmd_help_button(message: Message):
+    await cmd_help(message)
+
+
+@router.message(F.text == "📊 Статистика")
+async def cmd_stats_button(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Эта функция только для администратора.")
         return
-
-    if len(text) < 2:
-        await message.answer("⚠️ Запрос слишком короткий.")
-        return
-
-    await perform_search(message, text)
+    stats = await get_stats()
+    await message.answer(
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: <b>{stats['total_users']}</b>\n"
+        f"⚡ Активных сегодня: <b>{stats['active_today']}</b>\n"
+        f"📥 Всего скачиваний: <b>{stats['total_downloads']}</b>\n"
+        f"⭐ Premium: <b>{stats['premium_users']}</b>",
+    )
 
 
 async def handle_url(message: Message, url: str, platform: str):
@@ -736,6 +797,28 @@ async def cb_admin_stats(call: CallbackQuery):
     )
     await call.answer()
 
+# ─── Обработка успешной оплаты Premium ──────────────────────────────────
+
+@router.pre_checkout_query()
+async def pre_checkout_handler(pre_checkout: PreCheckoutQuery, bot: Bot):
+    """Обязательный обработчик, подтверждающий счёт."""
+    await bot.answer_pre_checkout_query(pre_checkout.id, ok=True)
+
+
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message):
+    """Активирует Premium после успешной оплаты."""
+    user_id = message.from_user.id
+    await set_premium(user_id, True)
+    await message.answer(
+        "⭐ **Поздравляю! Premium активирован!**\n\n"
+        "🎉 Теперь у тебя:\n"
+        "✅ Безлимитные скачивания\n"
+        "✅ 1080p видео\n"
+        "✅ Приоритетная обработка\n\n"
+        "Спасибо за поддержку! ❤️",
+        parse_mode="Markdown"
+    )
 
 @router.callback_query(F.data == "admin_users")
 async def cb_admin_users(call: CallbackQuery):

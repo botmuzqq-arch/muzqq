@@ -1,19 +1,33 @@
 """
 📊 База данных — статистика, пользователи, лимиты
-Используем aiosqlite для async SQLite
+aiosqlite (async SQLite). Для 1000+ запросов/день на один SQLite-файл
+включаем WAL (позволяет читать во время записи) и busy_timeout (вместо
+мгновенной ошибки "database is locked" соединение подождёт снятия блокировки).
 """
 
 import aiosqlite
 import logging
+from contextlib import asynccontextmanager
 from datetime import date
-from config import DB_PATH
+from typing import AsyncIterator, Optional
+
+from config import DB_PATH, SQLITE_BUSY_TIMEOUT_MS
 
 logger = logging.getLogger(__name__)
 
 
-async def init_db():
-    """Создаёт таблицы при первом запуске."""
-    async with aiosqlite.connect(DB_PATH) as db:
+@asynccontextmanager
+async def _connect() -> AsyncIterator[aiosqlite.Connection]:
+    """Открывает соединение с уже применёнными PRAGMA (WAL + busy_timeout)."""
+    async with aiosqlite.connect(DB_PATH, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        yield db
+
+
+async def init_db() -> None:
+    """Создаёт таблицы и индексы при первом запуске."""
+    async with _connect() as db:
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id     INTEGER PRIMARY KEY,
@@ -21,7 +35,7 @@ async def init_db():
                 first_name  TEXT,
                 is_premium  INTEGER DEFAULT 0,
                 is_banned   INTEGER DEFAULT 0,
-                created_at  TEXT DEFAULT (date('now'))
+                created_at  TEXT DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS downloads (
@@ -40,14 +54,22 @@ async def init_db():
                 count       INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, dl_date)
             );
+
+            CREATE INDEX IF NOT EXISTS idx_downloads_user ON downloads(user_id);
+            CREATE INDEX IF NOT EXISTS idx_downloads_created ON downloads(created_at);
         """)
         await db.commit()
-    logger.info("✅ Database initialized.")
+    logger.info("✅ База данных инициализирована (WAL включён)")
 
 
-async def register_user(user_id: int, username: str, first_name: str):
-    """Регистрирует или обновляет пользователя."""
-    async with aiosqlite.connect(DB_PATH) as db:
+async def register_user(user_id: int, username: str, first_name: str) -> None:
+    """Регистрирует или обновляет пользователя.
+
+    Вызывается из middleware на каждое сообщение — в middlewares.py это
+    обёрнуто в user_cache, чтобы не писать в SQLite на КАЖДОЕ сообщение,
+    а только когда данные пользователя реально могли устареть.
+    """
+    async with _connect() as db:
         await db.execute("""
             INSERT INTO users (user_id, username, first_name)
             VALUES (?, ?, ?)
@@ -58,13 +80,11 @@ async def register_user(user_id: int, username: str, first_name: str):
         await db.commit()
 
 
-async def get_user(user_id: int) -> dict | None:
-    """Возвращает данные пользователя."""
-    async with aiosqlite.connect(DB_PATH) as db:
+async def get_user(user_id: int) -> Optional[dict]:
+    """Возвращает данные пользователя или None, если не найден."""
+    async with _connect() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM users WHERE user_id = ?", (user_id,)
-        ) as cur:
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
@@ -77,7 +97,7 @@ async def is_user_banned(user_id: int) -> bool:
 async def get_daily_downloads(user_id: int) -> int:
     """Возвращает кол-во скачиваний пользователя за сегодня."""
     today = str(date.today())
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect() as db:
         async with db.execute(
             "SELECT count FROM daily_limits WHERE user_id=? AND dl_date=?",
             (user_id, today),
@@ -86,10 +106,10 @@ async def get_daily_downloads(user_id: int) -> int:
             return row[0] if row else 0
 
 
-async def increment_daily_downloads(user_id: int):
-    """Увеличивает счётчик скачиваний на 1."""
+async def increment_daily_downloads(user_id: int) -> None:
+    """Увеличивает счётчик скачиваний на 1 (атомарно, без гонок)."""
     today = str(date.today())
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect() as db:
         await db.execute("""
             INSERT INTO daily_limits (user_id, dl_date, count)
             VALUES (?, ?, 1)
@@ -99,9 +119,8 @@ async def increment_daily_downloads(user_id: int):
         await db.commit()
 
 
-async def log_download(user_id: int, url: str, media_type: str,
-                       quality: str, file_size: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+async def log_download(user_id: int, url: str, media_type: str, quality: str, file_size: int) -> None:
+    async with _connect() as db:
         await db.execute("""
             INSERT INTO downloads (user_id, url, media_type, quality, file_size)
             VALUES (?, ?, ?, ?, ?)
@@ -110,19 +129,17 @@ async def log_download(user_id: int, url: str, media_type: str,
 
 
 async def get_stats() -> dict:
-    """Статистика для админа."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    """Статистика для админа. Один connect, четыре быстрых запроса по индексам."""
+    async with _connect() as db:
         async with db.execute("SELECT COUNT(*) FROM users") as cur:
             total_users = (await cur.fetchone())[0]
         async with db.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM downloads WHERE created_at >= date('now','-1 day')"
+            "SELECT COUNT(DISTINCT user_id) FROM downloads WHERE created_at >= datetime('now', '-1 day')"
         ) as cur:
             active_today = (await cur.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM downloads") as cur:
             total_downloads = (await cur.fetchone())[0]
-        async with db.execute(
-            "SELECT COUNT(*) FROM users WHERE is_premium=1"
-        ) as cur:
+        async with db.execute("SELECT COUNT(*) FROM users WHERE is_premium=1") as cur:
             premium_users = (await cur.fetchone())[0]
 
     return {
@@ -133,26 +150,20 @@ async def get_stats() -> dict:
     }
 
 
-async def set_premium(user_id: int, value: bool):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET is_premium=? WHERE user_id=?",
-            (int(value), user_id)
-        )
+async def set_premium(user_id: int, value: bool) -> None:
+    async with _connect() as db:
+        await db.execute("UPDATE users SET is_premium=? WHERE user_id=?", (int(value), user_id))
         await db.commit()
 
 
-async def set_banned(user_id: int, value: bool):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET is_banned=? WHERE user_id=?",
-            (int(value), user_id)
-        )
+async def set_banned(user_id: int, value: bool) -> None:
+    async with _connect() as db:
+        await db.execute("UPDATE users SET is_banned=? WHERE user_id=?", (int(value), user_id))
         await db.commit()
 
 
 async def list_users(limit: int = 20) -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM users ORDER BY created_at DESC LIMIT ?", (limit,)

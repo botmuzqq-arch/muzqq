@@ -9,11 +9,19 @@
 кладём в callback_data ТОЛЬКО этот ID. При нажатии кнопки — резолвим
 ID обратно в URL. Тот же URL всегда даёт тот же ID (md5), поэтому
 повторные регистрации не плодят дубликаты.
+
+🔴 ВАЖНО: этот модуль должен использоваться ВЕЗДЕ, где URL кладётся в
+callback_data — то есть в keyboards.py при построении кнопок, и в
+handlers.py при их обработке. Если где-то положить сырой URL напрямую —
+получится либо BUTTON_DATA_INVALID (длинная ссылка), либо
+resolve() всегда будет возвращать None (короткий URL, но не
+зарегистрированный, а значит его нет в _store).
 """
 
 import hashlib
 import time
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +34,13 @@ _store: dict[str, tuple[str, float]] = {}
 
 
 def register(url: str) -> str:
-    """Регистрирует URL и возвращает короткий ID (12 символов, ~влезает в callback_data)."""
+    """Регистрирует URL и возвращает короткий ID (12 символов, влезает в callback_data)."""
     short_id = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
     _store[short_id] = (url, time.monotonic() + _TTL)
     return short_id
 
 
-def resolve(short_id: str) -> str | None:
+def resolve(short_id: str) -> Optional[str]:
     """Возвращает исходный URL по короткому ID, либо None если не найден/истёк."""
     entry = _store.get(short_id)
     if entry is None:
@@ -48,7 +56,7 @@ def resolve(short_id: str) -> str | None:
     return url
 
 
-def cleanup_expired():
+def cleanup_expired() -> None:
     """Чистит устаревшие записи (вызывать из фоновой задачи)."""
     now = time.monotonic()
     expired = [k for k, (_, exp) in _store.items() if now > exp]

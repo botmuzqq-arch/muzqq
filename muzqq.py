@@ -1,11 +1,12 @@
 """
 🎵 Music Bot — Telegram Music Service
-Powered by aiogram 3, yt-dlp, shazamio
+Powered by aiogram 3, yt-dlp
 """
 
 import asyncio
 import logging
 import sys
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -15,9 +16,8 @@ from handlers import router
 from middlewares import AntiSpamMiddleware
 from database import init_db
 from cache import periodic_cache_cleanup
-from downloader import periodic_downloads_cleanup
+from downloader import periodic_downloads_cleanup, shutdown_pools
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -29,9 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# В main() после создания bot добавь:
-
-async def main():
+async def main() -> None:
     logger.info("🚀 Starting Music Bot...")
 
     await init_db()
@@ -40,16 +38,18 @@ async def main():
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    
-    # 🔥 Устанавливаем больший таймаут для загрузки
-    bot.session.timeout = 600  # 10 минут на скачивание
- 
+    bot.session.timeout = 600  # 10 минут — с запасом на долгие загрузки
+
     dp = Dispatcher()
-    dp.message.middleware(AntiSpamMiddleware())
+
+    # Middleware вешаем и на message, и на callback_query — иначе кнопки
+    # "Скачать" полностью обходят антиспам и проверку бана (см. middlewares.py).
+    spam_guard = AntiSpamMiddleware()
+    dp.message.middleware(spam_guard)
+    dp.callback_query.middleware(spam_guard)
+
     dp.include_router(router)
 
-    # 🔥 ИСПРАВЛЕНО: фоновые задачи очистки кеша/файлов существовали в коде,
-    # но нигде не запускались — папка downloads и кеш росли бы бесконечно.
     cleanup_tasks = [
         asyncio.create_task(periodic_cache_cleanup()),
         asyncio.create_task(periodic_downloads_cleanup()),
@@ -61,6 +61,7 @@ async def main():
     finally:
         for task in cleanup_tasks:
             task.cancel()
+        shutdown_pools(wait=False)
         await bot.session.close()
         logger.info("Bot stopped.")
 
