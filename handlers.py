@@ -432,6 +432,30 @@ async def cmd_stats_button(message: Message):
         f"⭐ Premium: <b>{stats['premium_users']}</b>",
     )
 
+# ─── Обработка текстовых сообщений (URL или поиск) ───────────────────────────
+
+@router.message(F.text)
+async def handle_text(message: Message, state: FSMContext):
+    """Обработка обычных текстовых сообщений (поиск или ссылка)."""
+    text = message.text.strip()
+    logger.info(f"📩 Получено сообщение: {text[:50]}...")
+
+    # Проверяем, есть ли URL
+    url = extract_url(text)
+    if url:
+        platform = detect_platform(url)
+        if platform:
+            await handle_url(message, url, platform)
+            return
+        await message.answer("⚠️ Эта платформа не поддерживается.")
+        return
+
+    # Если не URL — ищем музыку
+    if len(text) < 2:
+        await message.answer("⚠️ Запрос слишком короткий.")
+        return
+
+    await perform_search(message, text)
 
 async def handle_url(message: Message, url: str, platform: str):
     """Показывает кнопки действий для ссылки."""

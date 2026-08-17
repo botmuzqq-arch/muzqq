@@ -218,8 +218,8 @@ PLATFORM_EMOJIS = {
 BOT_NAME = "Music Bot"
 BOT_DESCRIPTION = "Скачивай музыку и видео с YouTube, Instagram, TikTok"
 BOT_VERSION = "3.0.0"
-SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@sDjax")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "MuzQqbot")  # без @
-PREMIUM_PRICE_LABEL = os.getenv("PREMIUM_PRICE_LABEL", "400 stars/мес")
+SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "@your_support")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot")  # без @
+PREMIUM_PRICE_LABEL = os.getenv("PREMIUM_PRICE_LABEL", "200 руб/мес")
 
 logger.info("✅ Конфигурация загружена")
